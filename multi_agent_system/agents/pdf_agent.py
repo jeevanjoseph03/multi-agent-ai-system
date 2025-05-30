@@ -1,465 +1,256 @@
-import PyPDF2
 import re
-from typing import Dict, Any, List, Optional, Tuple
-from datetime import datetime
-from dataclasses import dataclass
+from PyPDF2 import PdfReader
+from io import BytesIO
+from typing import Dict, Any, List, Tuple, Union
 from enum import Enum
-import io
+from dataclasses import dataclass, asdict
 
-class DocumentType(Enum):
+class PDFDocumentType(Enum):
     INVOICE = "invoice"
-    POLICY = "policy"
-    CONTRACT = "contract"
-    REGULATION = "regulation"
+    POLICY = "policy_document"
+    REPORT = "report"
     UNKNOWN = "unknown"
 
-class RiskFlag(Enum):
-    HIGH_AMOUNT = "high_amount"
-    REGULATORY_MENTION = "regulatory_mention"
-    COMPLIANCE_ISSUE = "compliance_issue"
-    SUSPICIOUS_CONTENT = "suspicious_content"
+class PDFFlagType(Enum):
+    HIGH_INVOICE_AMOUNT = "high_invoice_amount"
+    COMPLIANCE_KEYWORD_GDPR = "compliance_keyword_gdpr"
+    COMPLIANCE_KEYWORD_FDA = "compliance_keyword_fda"
+    COMPLIANCE_KEYWORD_OTHER = "compliance_keyword_other"
+    MISSING_REQUIRED_FIELDS = "missing_required_fields_invoice" # Example
+    NONE = "none"
 
-@dataclass
-class PDFFlag:
-    flag_type: RiskFlag
-    field: str
-    value: Any
-    threshold: Any
-    severity: str
-    description: str
+class PDFActionType(Enum):
+    REVIEW_INVOICE = "review_invoice"
+    COMPLIANCE_ALERT = "compliance_alert"
+    ARCHIVE_DOCUMENT = "archive_document"
+    FLAG_FOR_LEGAL = "flag_for_legal_review"
+    NO_ACTION = "no_action"
 
 @dataclass
 class PDFAnalysis:
-    document_type: DocumentType
-    extracted_text: str
-    structured_data: Dict[str, Any]
-    flags: List[PDFFlag]
-    compliance_keywords: List[str]
-    risk_score: float
-    suggested_action: str
-    metadata: Dict[str, Any]
+    document_type: PDFDocumentType
+    confidence: float
+    extracted_fields: Dict[str, Any]
+    compliance_keywords_found: List[str]
+    flags: List[PDFFlagType]
+    risk_score: float # 0.0 to 1.0
+    suggested_action: PDFActionType
+    raw_text_preview: str # For brevity in logs
 
 class PDFAgent:
-    """
-    PDF Agent that extracts fields from PDF documents,
-    detects document types, and flags compliance/risk issues
-    """
-    
     def __init__(self):
         self.name = "pdf_agent"
-        self.document_patterns = self._load_document_patterns()
-        self.compliance_keywords = self._load_compliance_keywords()
-        self.extraction_patterns = self._load_extraction_patterns()
-        self.risk_thresholds = self._load_risk_thresholds()
-    
-    def _load_document_patterns(self) -> Dict[DocumentType, List[str]]:
-        """Patterns to identify different document types"""
-        return {
-            DocumentType.INVOICE: [
-                r'invoice\s*#?\s*\d+',
-                r'bill\s+to',
-                r'total\s+amount',
-                r'due\s+date',
-                r'subtotal',
-                r'tax\s+amount',
-                r'payment\s+terms'
-            ],
-            DocumentType.POLICY: [
-                r'policy\s+document',
-                r'terms\s+and\s+conditions',
-                r'privacy\s+policy',
-                r'data\s+protection',
-                r'user\s+agreement',
-                r'service\s+agreement'
-            ],
-            DocumentType.CONTRACT: [
-                r'contract\s+agreement',
-                r'party\s+of\s+the\s+first\s+part',
-                r'whereas\s+clause',
-                r'signature\s+date',
-                r'terms\s+of\s+agreement',
-                r'effective\s+date'
-            ],
-            DocumentType.REGULATION: [
-                r'regulation\s+\d+',
-                r'compliance\s+requirements',
-                r'regulatory\s+framework',
-                r'legal\s+obligations',
-                r'statutory\s+requirements'
-            ]
+        self.MAX_INVOICE_AMOUNT = 10000.0
+        self.COMPLIANCE_KEYWORDS = {
+            "GDPR": [r'\b(gdpr|general\s+data\s+protection\s+regulation)\b'],
+            "FDA": [r'\b(fda|food\s+and\s+drug\s+administration)\b'],
+            "OTHER": [r'\b(hipaa|ccpa|sox|pipeda|compliance|regulation|policy|terms\s+of\s+service)\b']
         }
-    
-    def _load_compliance_keywords(self) -> List[str]:
-        """Keywords that indicate regulatory/compliance content"""
-        return [
-            'gdpr', 'general data protection regulation',
-            'fda', 'food and drug administration',
-            'sox', 'sarbanes-oxley',
-            'hipaa', 'health insurance portability',
-            'pci dss', 'payment card industry',
-            'iso 27001', 'iso27001',
-            'ccpa', 'california consumer privacy act',
-            'ferpa', 'family educational rights',
-            'glba', 'gramm-leach-bliley act',
-            'compliance', 'regulatory', 'audit',
-            'data protection', 'privacy policy',
-            'information security', 'risk management'
-        ]
-    
-    def _load_extraction_patterns(self) -> Dict[str, str]:
-        """Regex patterns for extracting structured data"""
-        return {
-            # Invoice patterns
-            'invoice_number': r'invoice\s*#?\s*:?\s*([A-Z0-9\-]+)',
-            'invoice_date': r'(?:invoice\s+date|date)\s*:?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
-            'due_date': r'due\s+date\s*:?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
-            'total_amount': r'total\s+(?:amount\s+)?(?:due\s+)?:?\s*\$?\s*([\d,]+\.?\d*)',
-            'subtotal': r'subtotal\s*:?\s*\$?\s*([\d,]+\.?\d*)',
-            'tax_amount': r'tax\s*(?:amount\s*)?:?\s*\$?\s*([\d,]+\.?\d*)',
-            
-            # General patterns
-            'email': r'([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',
-            'phone': r'(\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})',
-            'amount': r'\$\s*([\d,]+\.?\d*)',
-            'date': r'(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
-            'percentage': r'(\d+\.?\d*)\s*%',
-            
-            # Policy/Contract patterns
-            'effective_date': r'effective\s+date\s*:?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})',
-            'expiration_date': r'expir(?:ation|y)\s+date\s*:?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})'
+        self.INVOICE_PATTERNS = {
+            "invoice_number": [r'invoice\s*(?:number|no\.?|#)\s*[:\s]*([A-Z0-9\-]+)', r'inv\s*-\s*([A-Z0-9\-]+)'],
+            "invoice_date": [r'(?:invoice\s+)?date\s*[:\s]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\w+\s+\d{1,2},\s+\d{4})'],
+            "due_date": [r'due\s+date\s*[:\s]*(\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\w+\s+\d{1,2},\s+\d{4})'],
+            "total_amount": [r'(?:total\s+amount|grand\s+total|total\s+due|amount\s+due)\s*[:\s]*\$?\s*([\d,]+\.\d{2})'],
+            "subtotal": [r'subtotal\s*[:\s]*\$?\s*([\d,]+\.\d{2})'],
+            "tax_amount": [r'tax(?:\s+\([\d\.]+%?\))?\s*[:\s]*\$?\s*([\d,]+\.\d{2})'],
+            "bill_to": [r'bill\s+to\s*[:\s]*\n?([\s\S]*?)(?=\n\n|\nship\s+to|\nitem|\ndescription|payment\s+terms|notes|thank\s+you|subtotal)', r'customer\s*[:\s]*\n?([\s\S]*?)(?=\n\n|\nitem)'],
+            # Basic line item capture (can be complex)
+            "line_items_header": [r'(description|item)\s+(quantity|qty)\s+(unit\s+price|price)\s+(amount|total)'],
         }
-    
-    def _load_risk_thresholds(self) -> Dict[str, Any]:
-        """Thresholds for flagging risks"""
-        return {
-            'max_invoice_amount': 10000,
-            'suspicious_amounts': [9999, 9999.99, 10000, 5000],
-            'compliance_flag_keywords': ['gdpr', 'fda', 'hipaa', 'sox'],
-            'max_document_age_days': 365,
-            'min_confidence_threshold': 0.7
-        }
-    
-    def extract_text_from_pdf(self, pdf_content: bytes) -> str:
-        """Extract text content from PDF bytes"""
+
+    def _extract_text_from_bytes(self, pdf_bytes: bytes) -> str:
+        text = ""
         try:
-            pdf_file = io.BytesIO(pdf_content)
-            pdf_reader = PyPDF2.PdfReader(pdf_file)
-            
-            text = ""
-            for page_num in range(len(pdf_reader.pages)):
-                page = pdf_reader.pages[page_num]
-                text += page.extract_text() + "\n"
-            
-            return text.strip()
-        
+            reader = PdfReader(BytesIO(pdf_bytes))
+            for page in reader.pages:
+                text += page.extract_text() or ""
         except Exception as e:
-            raise Exception(f"Failed to extract text from PDF: {str(e)}")
-    
-    def extract_text_from_file(self, file_path: str) -> str:
-        """Extract text from PDF file"""
+            print(f"Error extracting text from PDF bytes: {e}")
+        return text
+
+    def _extract_text_from_file(self, file_path: str) -> str:
+        text = ""
         try:
-            with open(file_path, 'rb') as file:
-                return self.extract_text_from_pdf(file.read())
+            with open(file_path, "rb") as f:
+                reader = PdfReader(f)
+                for page in reader.pages:
+                    text += page.extract_text() or ""
         except Exception as e:
-            raise Exception(f"Failed to read PDF file {file_path}: {str(e)}")
-    
-    def detect_document_type(self, text: str) -> Tuple[DocumentType, float]:
-        """Detect the type of document based on content"""
+            print(f"Error extracting text from PDF file {file_path}: {e}")
+        return text
+
+    def _detect_document_type(self, text: str) -> Tuple[PDFDocumentType, float]:
         text_lower = text.lower()
-        type_scores = {}
+        if any(keyword in text_lower for keyword in ["invoice", "bill to", "total due", "statement of account"]):
+            if any(keyword in text_lower for keyword in ["line item", "description", "qty", "unit price"]):
+                return PDFDocumentType.INVOICE, 0.9
+            return PDFDocumentType.INVOICE, 0.7
+        if any(keyword in text_lower for keyword in ["policy", "terms and conditions", "privacy statement", "regulation", "gdpr", "fda"]):
+            return PDFDocumentType.POLICY, 0.8
+        if any(keyword in text_lower for keyword in ["report", "summary", "analysis", "findings"]):
+            return PDFDocumentType.REPORT, 0.6
+        return PDFDocumentType.UNKNOWN, 0.3
+
+    def _extract_structured_data(self, text: str, doc_type: PDFDocumentType) -> Dict[str, Any]:
+        data: Dict[str, Any] = {"raw_text_preview": text[:500] + "..."} # Store a preview
+        text_lower_for_search = text # Keep original case for some captures if needed, but search lower
         
-        for doc_type, patterns in self.document_patterns.items():
-            score = 0
-            for pattern in patterns:
-                matches = len(re.findall(pattern, text_lower, re.IGNORECASE))
-                score += matches
-            
-            # Normalize score
-            type_scores[doc_type] = score / len(patterns) if patterns else 0
+        if doc_type == PDFDocumentType.INVOICE:
+            for field, patterns in self.INVOICE_PATTERNS.items():
+                if field == "line_items_header": # Skip direct extraction of header
+                    continue
+                for pattern in patterns:
+                    match = re.search(pattern, text, re.IGNORECASE | re.DOTALL)
+                    if match:
+                        value = match.group(1).strip() if len(match.groups()) > 0 else match.group(0).strip()
+                        if field in ["total_amount", "subtotal", "tax_amount"]:
+                            try:
+                                data[field] = float(value.replace(',', ''))
+                            except ValueError:
+                                data[field] = value # Store as string if conversion fails
+                        else:
+                            data[field] = value
+                        break # Found pattern for this field
+            # Basic line item extraction (example, very simplified)
+            # A more robust solution would parse tables or use more advanced regex
+            line_items = []
+            # This is a placeholder for more complex line item logic
+            # For simplicity, we'll just look for a few keywords if a header was found
+            if re.search(self.INVOICE_PATTERNS["line_items_header"][0], text, re.IGNORECASE):
+                # Example: find lines that look like "item description qty price total"
+                # This is highly dependent on PDF structure and often requires OCR or table parsing tools for reliability
+                # For now, we'll just indicate that line items might be present
+                data["line_items_detected"] = True
+                # A real implementation would iterate through lines after the header
+                # and try to parse each column.
+                # Example:
+                # item_matches = re.findall(r"^(.*?)\s+(\d+)\s+\$?([\d\.,]+)\s+\$?([\d\.,]+)$", text, re.MULTILINE | re.IGNORECASE)
+                # for item_match in item_matches:
+                # line_items.append({"description": item_match[0].strip(), "quantity": int(item_match[1]), ...})
+            data["line_items"] = line_items if line_items else "Line item extraction not fully implemented for this text structure."
+
+
+        elif doc_type == PDFDocumentType.POLICY:
+            data["title"] = "Policy Document" # Placeholder
+            if match := re.search(r'effective\s+date\s*[:\s]*(.*)', text, re.IGNORECASE):
+                data["effective_date"] = match.group(1).strip()
+            # Could extract sections, etc.
         
-        # Find best match
-        if not type_scores or all(score == 0 for score in type_scores.values()):
-            return DocumentType.UNKNOWN, 0.0
-        
-        best_type = max(type_scores.items(), key=lambda x: x[1])
-        confidence = min(best_type[1], 1.0)
-        
-        return best_type[0], confidence
-    
-    def extract_structured_data(self, text: str, document_type: DocumentType) -> Dict[str, Any]:
-        """Extract structured fields based on document type"""
-        extracted_data = {}
-        text_lower = text.lower()
-        
-        # Extract using regex patterns
-        for field_name, pattern in self.extraction_patterns.items():
-            matches = re.findall(pattern, text_lower, re.IGNORECASE)
-            if matches:
-                # Take the first match, clean it up
-                value = matches[0].strip().replace(',', '')
-                
-                # Try to convert numbers
-                if field_name.endswith('_amount') or field_name == 'total_amount':
-                    try:
-                        extracted_data[field_name] = float(value)
-                    except ValueError:
-                        extracted_data[field_name] = value
-                else:
-                    extracted_data[field_name] = value
-        
-        # Document-specific extraction
-        if document_type == DocumentType.INVOICE:
-            extracted_data.update(self._extract_invoice_line_items(text))
-        elif document_type == DocumentType.POLICY:
-            extracted_data.update(self._extract_policy_details(text))
-        
-        return extracted_data
-    
-    def _extract_invoice_line_items(self, text: str) -> Dict[str, Any]:
-        """Extract line items from invoice"""
-        line_items = []
-        lines = text.split('\n')
-        
-        # Look for line item patterns
-        item_pattern = r'(.+?)\s+(\d+)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'
-        
-        for line in lines:
-            match = re.search(item_pattern, line.strip())
-            if match:
-                line_items.append({
-                    'description': match.group(1).strip(),
-                    'quantity': int(match.group(2)),
-                    'unit_price': float(match.group(3).replace(',', '')),
-                    'total': float(match.group(4).replace(',', ''))
-                })
-        
-        return {
-            'line_items': line_items,
-            'line_item_count': len(line_items)
-        }
-    
-    def _extract_policy_details(self, text: str) -> Dict[str, Any]:
-        """Extract policy-specific information"""
-        policy_data = {}
-        
-        # Look for policy sections
-        sections = re.findall(r'(\d+\.?\s+[A-Z][^.]+)', text)
-        policy_data['sections'] = sections[:10]  # First 10 sections
-        
-        # Look for data retention periods
-        retention_pattern = r'retain.*?(\d+)\s+(days?|months?|years?)'
-        retention_matches = re.findall(retention_pattern, text.lower())
-        if retention_matches:
-            policy_data['retention_periods'] = retention_matches
-        
-        return policy_data
-    
-    def detect_compliance_issues(self, text: str) -> List[str]:
-        """Detect compliance-related keywords"""
-        text_lower = text.lower()
+        return data
+
+    def _detect_compliance_issues(self, text: str) -> List[str]:
         found_keywords = []
-        
-        for keyword in self.compliance_keywords:
-            if keyword.lower() in text_lower:
-                found_keywords.append(keyword)
-        
-        return found_keywords
-    
-    def flag_risks(self, structured_data: Dict[str, Any], compliance_keywords: List[str]) -> List[PDFFlag]:
-        """Flag potential risks based on extracted data"""
+        text_lower = text.lower()
+        for category, patterns in self.COMPLIANCE_KEYWORDS.items():
+            for pattern in patterns:
+                if re.search(pattern, text_lower):
+                    found_keywords.append(f"{category}_keyword_found") # More generic
+                    # Or be specific:
+                    # if category == "GDPR": found_keywords.append("GDPR")
+                    # elif category == "FDA": found_keywords.append("FDA")
+                    # else: found_keywords.append(pattern) # or a generic "OTHER_COMPLIANCE"
+        return list(set(found_keywords)) # Unique keywords
+
+    def _flag_risks(self, extracted_data: Dict[str, Any], compliance_keywords: List[str], doc_type: PDFDocumentType) -> List[PDFFlagType]:
         flags = []
+        if doc_type == PDFDocumentType.INVOICE:
+            total_amount = extracted_data.get("total_amount")
+            if isinstance(total_amount, (float, int)) and total_amount > self.MAX_INVOICE_AMOUNT:
+                flags.append(PDFFlagType.HIGH_INVOICE_AMOUNT)
+            # Example: Check for missing essential invoice fields
+            required_invoice_fields = ["invoice_number", "invoice_date", "total_amount", "bill_to"]
+            if not all(field in extracted_data and extracted_data[field] for field in required_invoice_fields):
+                flags.append(PDFFlagType.MISSING_REQUIRED_FIELDS)
+
+
+        if any("GDPR_keyword_found" in kw for kw in compliance_keywords):
+            flags.append(PDFFlagType.COMPLIANCE_KEYWORD_GDPR)
+        if any("FDA_keyword_found" in kw for kw in compliance_keywords):
+            flags.append(PDFFlagType.COMPLIANCE_KEYWORD_FDA)
+        if any("OTHER_keyword_found" in kw for kw in compliance_keywords):
+            flags.append(PDFFlagType.COMPLIANCE_KEYWORD_OTHER)
         
-        # Check for high invoice amounts
-        if 'total_amount' in structured_data:
-            amount = structured_data['total_amount']
-            if isinstance(amount, (int, float)) and amount > self.risk_thresholds['max_invoice_amount']:
-                flags.append(PDFFlag(
-                    flag_type=RiskFlag.HIGH_AMOUNT,
-                    field='total_amount',
-                    value=amount,
-                    threshold=self.risk_thresholds['max_invoice_amount'],
-                    severity='high',
-                    description=f'Invoice amount ${amount:,.2f} exceeds threshold of ${self.risk_thresholds["max_invoice_amount"]:,.2f}'
-                ))
-        
-        # Check for regulatory compliance mentions
-        critical_compliance = ['gdpr', 'fda', 'hipaa', 'sox']
-        for keyword in compliance_keywords:
-            if keyword.lower() in critical_compliance:
-                flags.append(PDFFlag(
-                    flag_type=RiskFlag.REGULATORY_MENTION,
-                    field='compliance_keywords',
-                    value=keyword,
-                    threshold='regulatory_keyword',
-                    severity='medium',
-                    description=f'Document mentions critical regulatory keyword: {keyword.upper()}'
-                ))
-        
-        # Check for suspicious amounts
-        for field_name, value in structured_data.items():
-            if field_name.endswith('_amount') and isinstance(value, (int, float)):
-                if value in self.risk_thresholds['suspicious_amounts']:
-                    flags.append(PDFFlag(
-                        flag_type=RiskFlag.SUSPICIOUS_CONTENT,
-                        field=field_name,
-                        value=value,
-                        threshold='suspicious_pattern',
-                        severity='medium',
-                        description=f'Amount ${value} matches suspicious test pattern'
-                    ))
-        
-        return flags
-    
-    def calculate_risk_score(self, flags: List[PDFFlag], document_type: DocumentType) -> float:
-        """Calculate overall risk score"""
         if not flags:
-            return 0.0
-        
-        severity_weights = {
-            'low': 0.1,
-            'medium': 0.3,
-            'high': 0.6,
-            'critical': 1.0
-        }
-        
-        total_score = sum(severity_weights.get(flag.severity, 0.1) for flag in flags)
-        
-        # Document type modifiers
-        type_multipliers = {
-            DocumentType.INVOICE: 1.2,  # Financial docs are higher risk
-            DocumentType.POLICY: 1.1,   # Compliance docs need attention
-            DocumentType.CONTRACT: 1.1,
-            DocumentType.REGULATION: 1.3,
-            DocumentType.UNKNOWN: 0.8
-        }
-        
-        multiplier = type_multipliers.get(document_type, 1.0)
-        final_score = min(total_score * multiplier / len(flags), 1.0)
-        
-        return final_score
-    
-    def determine_action(self, risk_score: float, flags: List[PDFFlag]) -> str:
-        """Determine suggested action based on analysis"""
-        high_severity_count = sum(1 for flag in flags if flag.severity == 'high')
-        
-        if risk_score >= 0.8 or high_severity_count >= 2:
-            return "escalate_compliance_review"
-        elif risk_score >= 0.6 or high_severity_count >= 1:
-            return "flag_for_manual_review"
-        elif risk_score >= 0.3:
-            return "log_for_audit"
-        else:
-            return "process_normally"
-    
-    def generate_metadata(self, text: str, structured_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate metadata about the document"""
-        lines = text.split('\n')
-        words = text.split()
-        
-        return {
-            'character_count': len(text),
-            'word_count': len(words),
-            'line_count': len(lines),
-            'page_count_estimate': max(1, len(lines) // 50),  # Rough estimate
-            'has_tables': bool(re.search(r'\|\s*\w+\s*\|', text)),
-            'has_signatures': bool(re.search(r'signature|signed|_____', text.lower())),
-            'contains_amounts': len([k for k in structured_data.keys() if 'amount' in k]),
-            'contains_dates': len([k for k in structured_data.keys() if 'date' in k]),
-            'processed_at': datetime.now().isoformat()
-        }
-    
-    def process_pdf(self, pdf_input, input_type: str = "file") -> PDFAnalysis:
+            flags.append(PDFFlagType.NONE)
+        return list(set(flags))
+
+    def _calculate_risk_score(self, flags: List[PDFFlagType], doc_type: PDFDocumentType) -> float:
+        score = 0.0
+        if PDFFlagType.HIGH_INVOICE_AMOUNT in flags: score += 0.5
+        if PDFFlagType.COMPLIANCE_KEYWORD_GDPR in flags: score += 0.3
+        if PDFFlagType.COMPLIANCE_KEYWORD_FDA in flags: score += 0.4
+        if PDFFlagType.COMPLIANCE_KEYWORD_OTHER in flags: score += 0.2
+        if PDFFlagType.MISSING_REQUIRED_FIELDS in flags and doc_type == PDFDocumentType.INVOICE: score += 0.3
+        return min(score, 1.0)
+
+    def _determine_action(self, flags: List[PDFFlagType], risk_score: float, doc_type: PDFDocumentType) -> PDFActionType:
+        if PDFFlagType.HIGH_INVOICE_AMOUNT in flags:
+            return PDFActionType.REVIEW_INVOICE
+        if PDFFlagType.COMPLIANCE_KEYWORD_GDPR in flags or PDFFlagType.COMPLIANCE_KEYWORD_FDA in flags:
+            return PDFActionType.FLAG_FOR_LEGAL
+        if PDFFlagType.COMPLIANCE_KEYWORD_OTHER in flags and doc_type == PDFDocumentType.POLICY:
+            return PDFActionType.COMPLIANCE_ALERT
+        if risk_score > 0.5:
+            return PDFActionType.REVIEW_INVOICE # Generic review for high risk
+        if doc_type != PDFDocumentType.UNKNOWN:
+            return PDFActionType.ARCHIVE_DOCUMENT
+        return PDFActionType.NO_ACTION
+
+    def process_pdf(self, pdf_input: Union[str, bytes], input_type: str = "file") -> PDFAnalysis:
         """
-        Main method to process a PDF document
-        
+        Main method to process a PDF document or PDF-like text.
         Args:
-            pdf_input: Either file path (str) or PDF bytes
-            input_type: "file" or "bytes"
+            pdf_input: File path (str), PDF bytes, or raw text content (str).
+            input_type: "file", "bytes", or "text_content".
         """
-        try:
-            # Extract text
-            if input_type == "file":
-                text = self.extract_text_from_file(pdf_input)
-            else:  # bytes
-                text = self.extract_text_from_pdf(pdf_input)
-            
-            # Detect document type
-            document_type, type_confidence = self.detect_document_type(text)
-            
-            # Extract structured data
-            structured_data = self.extract_structured_data(text, document_type)
-            
-            # Detect compliance issues
-            compliance_keywords = self.detect_compliance_issues(text)
-            
-            # Flag risks
-            flags = self.flag_risks(structured_data, compliance_keywords)
-            
-            # Calculate risk score
-            risk_score = self.calculate_risk_score(flags, document_type)
-            
-            # Determine action
-            suggested_action = self.determine_action(risk_score, flags)
-            
-            # Generate metadata
-            metadata = self.generate_metadata(text, structured_data)
-            metadata['document_type_confidence'] = type_confidence
-            
+        text = ""
+        if input_type == "file":
+            text = self._extract_text_from_file(str(pdf_input))
+        elif input_type == "bytes":
+            text = self._extract_text_from_bytes(bytes(pdf_input))
+        elif input_type == "text_content":
+            text = str(pdf_input)
+        else:
+            raise ValueError(f"Unsupported input_type for PDFAgent: {input_type}")
+
+        if not text:
             return PDFAnalysis(
-                document_type=document_type,
-                extracted_text=text[:1000] + "..." if len(text) > 1000 else text,  # Truncate for storage
-                structured_data=structured_data,
-                flags=flags,
-                compliance_keywords=compliance_keywords,
-                risk_score=risk_score,
-                suggested_action=suggested_action,
-                metadata=metadata
+                document_type=PDFDocumentType.UNKNOWN,
+                confidence=0.1,
+                extracted_fields={"error": "Failed to extract text or empty content"},
+                compliance_keywords_found=[],
+                flags=[PDFFlagType.NONE],
+                risk_score=0.0,
+                suggested_action=PDFActionType.NO_ACTION,
+                raw_text_preview="N/A"
             )
-            
-        except Exception as e:
-            # Return error analysis
-            return PDFAnalysis(
-                document_type=DocumentType.UNKNOWN,
-                extracted_text="",
-                structured_data={},
-                flags=[PDFFlag(
-                    flag_type=RiskFlag.SUSPICIOUS_CONTENT,
-                    field="processing_error",
-                    value=str(e),
-                    threshold="no_errors",
-                    severity="critical",
-                    description=f"PDF processing failed: {str(e)}"
-                )],
-                compliance_keywords=[],
-                risk_score=1.0,
-                suggested_action="manual_review_required",
-                metadata={"error": str(e), "processed_at": datetime.now().isoformat()}
-            )
-    
-    def get_extracted_fields(self, analysis: PDFAnalysis) -> Dict[str, Any]:
-        """Convert analysis to dictionary for storage"""
-        return {
-            "document_type": analysis.document_type.value,
-            "text_length": len(analysis.extracted_text),
-            "structured_fields_count": len(analysis.structured_data),
-            "compliance_keywords_found": len(analysis.compliance_keywords),
-            "compliance_keywords": ",".join(analysis.compliance_keywords),
-            "flags_count": len(analysis.flags),
-            "high_severity_flags": sum(1 for flag in analysis.flags if flag.severity == "high"),
-            "risk_score": analysis.risk_score,
-            "suggested_action": analysis.suggested_action,
-            "word_count": analysis.metadata.get("word_count", 0),
-            "contains_amounts": analysis.metadata.get("contains_amounts", 0),
-            "contains_dates": analysis.metadata.get("contains_dates", 0),
-            "processed_at": datetime.now().isoformat(),
-            "structured_data": str(analysis.structured_data),
-            "flag_details": str([{
-                "type": flag.flag_type.value,
-                "field": flag.field,
-                "severity": flag.severity,
-                "description": flag.description
-            } for flag in analysis.flags])
-        }
+
+        doc_type, confidence = self._detect_document_type(text)
+        extracted_data = self._extract_structured_data(text, doc_type)
+        compliance_keywords = self._detect_compliance_issues(text)
+        flags = self._flag_risks(extracted_data, compliance_keywords, doc_type)
+        risk_score = self._calculate_risk_score(flags, doc_type)
+        action = self._determine_action(flags, risk_score, doc_type)
+
+        return PDFAnalysis(
+            document_type=doc_type,
+            confidence=confidence,
+            extracted_fields=extracted_data,
+            compliance_keywords_found=compliance_keywords,
+            flags=flags,
+            risk_score=risk_score,
+            suggested_action=action,
+            raw_text_preview=text[:200] + "..."
+        )
+
+    def get_extracted_fields(self, analysis_result: PDFAnalysis) -> Dict[str, Any]:
+        """Converts PDFAnalysis to a dictionary for storage/response."""
+        # Convert enums to their string values for JSON serialization
+        result_dict = asdict(analysis_result)
+        result_dict["document_type"] = analysis_result.document_type.value
+        result_dict["flags"] = [flag.value for flag in analysis_result.flags]
+        result_dict["suggested_action"] = analysis_result.suggested_action.value
+        return result_dict
 
 # Example usage and testing
 if __name__ == "__main__":

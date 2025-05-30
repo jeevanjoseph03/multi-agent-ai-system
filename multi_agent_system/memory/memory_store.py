@@ -1,248 +1,193 @@
-from datetime import datetime
-from typing import Dict, List, Any, Optional
-import json
 import sqlite3
-import threading
-from dataclasses import dataclass, asdict
-from enum import Enum
+from datetime import datetime
+from typing import Dict, Any, Optional, List
+import json # For serializing complex data like dictionaries/lists
 
-class ActionStatus(Enum):
-    PENDING = "pending"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-@dataclass
+# Define data structures for what will be stored (can also use Pydantic models)
 class InputMetadata:
-    source: str
-    timestamp: datetime
-    format_type: str
-    intent: str
-    file_path: Optional[str] = None
-    
-    def to_dict(self):
-        return {
-            'source': self.source,
-            'timestamp': self.timestamp.isoformat(),
-            'format_type': self.format_type,
-            'intent': self.intent,
-            'file_path': self.file_path
-        }
-
-@dataclass
-class AgentAction:
-    agent_name: str
-    action_type: str
-    status: ActionStatus
-    details: Dict[str, Any]
-    timestamp: datetime
-    
-    def to_dict(self):
-        return {
-            'agent_name': self.agent_name,
-            'action_type': self.action_type,
-            'status': self.status.value,
-            'details': json.dumps(self.details),
-            'timestamp': self.timestamp.isoformat()
-        }
+    def __init__(self, source: str, timestamp: datetime, format_type: str, intent: str, file_path: Optional[str] = None):
+        self.source = source
+        self.timestamp = timestamp
+        self.format_type = format_type
+        self.intent = intent
+        self.file_path = file_path
 
 class MemoryStore:
-    """
-    Shared memory store for all agents to read/write data
-    Uses SQLite for persistence and in-memory dict for fast access
-    """
-    
-    def __init__(self, db_path: str = "memory_store.db"):
+    def __init__(self, db_path="memory_store.db"):
         self.db_path = db_path
-        self.lock = threading.Lock()
-        self._init_database()
-        
-    def _init_database(self):
-        """Initialize the SQLite database with required tables"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            
-            # Input metadata table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS input_metadata (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source TEXT NOT NULL,
-                    timestamp TEXT NOT NULL,
-                    format_type TEXT NOT NULL,
-                    intent TEXT NOT NULL,
-                    file_path TEXT,
-                    session_id TEXT
-                )
-            ''')
-            
-            # Extracted fields table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS extracted_fields (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    agent_name TEXT NOT NULL,
-                    field_name TEXT NOT NULL,
-                    field_value TEXT,
-                    timestamp TEXT NOT NULL
-                )
-            ''')
-            
-            # Agent actions table
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS agent_actions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id TEXT NOT NULL,
-                    agent_name TEXT NOT NULL,
-                    action_type TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    details TEXT,
-                    timestamp TEXT NOT NULL
-                )
-            ''')
-            
-            conn.commit()
-    
-    def store_input_metadata(self, metadata: InputMetadata, session_id: str) -> int:
-        """Store input metadata and return the ID"""
-        with self.lock:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO input_metadata 
-                    (source, timestamp, format_type, intent, file_path, session_id)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (
-                    metadata.source,
-                    metadata.timestamp.isoformat(),
-                    metadata.format_type,
-                    metadata.intent,
-                    metadata.file_path,
-                    session_id
-                ))
-                conn.commit()
-                return cursor.lastrowid
-    
-    def store_extracted_fields(self, session_id: str, agent_name: str, 
-                             fields: Dict[str, Any]) -> None:
-        """Store extracted fields from an agent"""
-        with self.lock:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                timestamp = datetime.now().isoformat()
-                
-                for field_name, field_value in fields.items():
-                    cursor.execute('''
-                        INSERT INTO extracted_fields 
-                        (session_id, agent_name, field_name, field_value, timestamp)
-                        VALUES (?, ?, ?, ?, ?)
-                    ''', (
-                        session_id,
-                        agent_name,
-                        field_name,
-                        str(field_value),
-                        timestamp
-                    ))
-                conn.commit()
-    
-    def store_agent_action(self, session_id: str, action: AgentAction) -> None:
-        """Store an agent action"""
-        with self.lock:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO agent_actions 
-                    (session_id, agent_name, action_type, status, details, timestamp)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (
-                    session_id,
-                    action.agent_name,
-                    action.action_type,
-                    action.status.value,
-                    json.dumps(action.details),
-                    action.timestamp.isoformat()
-                ))
-                conn.commit()
-    
-    def get_session_data(self, session_id: str) -> Dict[str, Any]:
-        """Get all data for a session"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            # Get metadata
-            cursor.execute(
-                'SELECT * FROM input_metadata WHERE session_id = ?', 
-                (session_id,)
-            )
-            metadata = cursor.fetchone()
-            
-            # Get extracted fields
-            cursor.execute(
-                'SELECT * FROM extracted_fields WHERE session_id = ?', 
-                (session_id,)
-            )
-            fields = cursor.fetchall()
-            
-            # Get actions
-            cursor.execute(
-                'SELECT * FROM agent_actions WHERE session_id = ?', 
-                (session_id,)
-            )
-            actions = cursor.fetchall()
-            
-            return {
-                'metadata': dict(metadata) if metadata else None,
-                'extracted_fields': [dict(field) for field in fields],
-                'actions': [dict(action) for action in actions]
-            }
-    
-    def clear_session(self, session_id: str) -> None:
-        """Clear all data for a session"""
-        with self.lock:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                cursor.execute('DELETE FROM input_metadata WHERE session_id = ?', (session_id,))
-                cursor.execute('DELETE FROM extracted_fields WHERE session_id = ?', (session_id,))
-                cursor.execute('DELETE FROM agent_actions WHERE session_id = ?', (session_id,))
-                conn.commit()
+        self._create_tables()
 
-# Example usage and testing
-if __name__ == "__main__":
-    # Test the memory store
-    memory = MemoryStore()
+    def _get_db_connection(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row # Access columns by name
+        return conn
+
+    def _create_tables(self):
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        
+        # Table for overall session/processing events
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS processing_sessions (
+            session_id TEXT PRIMARY KEY,
+            start_time TEXT NOT NULL,
+            input_source TEXT,
+            input_filename TEXT,
+            classified_format TEXT,
+            classified_intent TEXT,
+            classification_reasoning TEXT,
+            end_time TEXT,
+            status TEXT 
+        )
+        """)
+        
+        # Table for data extracted by each agent
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_extractions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            extracted_data TEXT NOT NULL, -- JSON string of extracted fields
+            FOREIGN KEY (session_id) REFERENCES processing_sessions (session_id)
+        )
+        """)
+        
+        # Table for actions triggered by the ActionRouter
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS triggered_actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            priority TEXT,
+            status TEXT, -- e.g., queued, success, failed, retrying
+            details TEXT, -- JSON string of action details or API response
+            external_reference_id TEXT, -- e.g., CRM ticket ID
+            retry_count INTEGER DEFAULT 0,
+            FOREIGN KEY (session_id) REFERENCES processing_sessions (session_id)
+        )
+        """)
+        conn.commit()
+        conn.close()
+
+    def start_session(self, session_id: str, source: str, filename: Optional[str]) -> None:
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+        INSERT INTO processing_sessions (session_id, start_time, input_source, input_filename, status)
+        VALUES (?, ?, ?, ?, ?)
+        """, (session_id, datetime.now().isoformat(), source, filename, "started"))
+        conn.commit()
+        conn.close()
+
+    def store_input_metadata(self, metadata: InputMetadata, session_id: str, classification_reasoning: str = ""):
+        """Stores initial classification and input metadata for a session."""
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        # Update existing session record if it was started, or insert if this is the first point
+        cursor.execute("""
+        UPDATE processing_sessions 
+        SET classified_format = ?, classified_intent = ?, classification_reasoning = ?, input_source = ?, input_filename = ?
+        WHERE session_id = ?
+        """, (metadata.format_type, metadata.intent, classification_reasoning, metadata.source, metadata.file_path, session_id))
+        
+        if cursor.rowcount == 0: # If session wasn't pre-started
+             cursor.execute("""
+            INSERT INTO processing_sessions (session_id, start_time, input_source, input_filename, classified_format, classified_intent, classification_reasoning, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (session_id, metadata.timestamp.isoformat(), metadata.source, metadata.file_path, metadata.format_type, metadata.intent, classification_reasoning, "classified"))
+        conn.commit()
+        conn.close()
+
+    def store_extracted_fields(self, session_id: str, agent_name: str, extracted_data: Dict[str, Any]):
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+        INSERT INTO agent_extractions (session_id, agent_name, timestamp, extracted_data)
+        VALUES (?, ?, ?, ?)
+        """, (session_id, agent_name, datetime.now().isoformat(), json.dumps(extracted_data)))
+        conn.commit()
+        conn.close()
+
+    def store_action_result(self, session_id: str, action_type: str, priority: str, status: str, details: Optional[Dict[str, Any]] = None, external_ref_id: Optional[str] = None, retry_count: int = 0):
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+        INSERT INTO triggered_actions (session_id, action_type, timestamp, priority, status, details, external_reference_id, retry_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (session_id, action_type, datetime.now().isoformat(), priority, status, json.dumps(details) if details else None, external_ref_id, retry_count))
+        conn.commit()
+        conn.close()
     
-    # Create sample metadata
-    metadata = InputMetadata(
-        source="email",
-        timestamp=datetime.now(),
-        format_type="email",
-        intent="complaint",
-        file_path="sample_email.txt"
-    )
-    
-    session_id = "test_session_123"
-    
-    # Store metadata
-    metadata_id = memory.store_input_metadata(metadata, session_id)
-    print(f"Stored metadata with ID: {metadata_id}")
-    
-    # Store some extracted fields
-    fields = {
-        "sender": "angry_customer@example.com",
-        "urgency": "high",
-        "tone": "angry"
-    }
-    memory.store_extracted_fields(session_id, "email_agent", fields)
-    
-    # Store an action
-    action = AgentAction(
-        agent_name="email_agent",
-        action_type="escalate",
-        status=ActionStatus.COMPLETED,
-        details={"crm_ticket_id": "CRM-12345"},
-        timestamp=datetime.now()
-    )
-    memory.store_agent_action(session_id, action)
-    
-    # Retrieve session data
-    session_data = memory.get_session_data(session_id)
-    print("Session data:", json.dumps(session_data, indent=2, default=str))
+    def update_action_status(self, action_id: int, status: str, details: Optional[Dict[str, Any]] = None, external_ref_id: Optional[str] = None, retry_count: Optional[int] = None):
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        updates = []
+        params = []
+        if details is not None:
+            updates.append("details = ?")
+            params.append(json.dumps(details))
+        if external_ref_id is not None:
+            updates.append("external_reference_id = ?")
+            params.append(external_ref_id)
+        if retry_count is not None:
+            updates.append("retry_count = ?")
+            params.append(retry_count)
+        
+        if not updates and status is None: # Nothing to update
+            conn.close()
+            return
+
+        if status is not None:
+            updates.append("status = ?") # Always update status if provided
+            params.append(status)
+
+        query = f"UPDATE triggered_actions SET {', '.join(updates)} WHERE id = ?"
+        params.append(action_id)
+        
+        cursor.execute(query, tuple(params))
+        conn.commit()
+        conn.close()
+
+
+    def end_session(self, session_id: str, final_status: str):
+        conn = self._get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+        UPDATE processing_sessions
+        SET end_time = ?, status = ?
+        WHERE session_id = ?
+        """, (datetime.now().isoformat(), final_status, session_id))
+        conn.commit()
+        conn.close()
+
+    def get_session_trace(self, session_id: str) -> Dict[str, Any]:
+        conn = self._get_db_connection()
+        session_data = conn.execute("SELECT * FROM processing_sessions WHERE session_id = ?", (session_id,)).fetchone()
+        
+        if not session_data:
+            return {"error": "Session not found"}
+            
+        agent_extractions_raw = conn.execute("SELECT * FROM agent_extractions WHERE session_id = ? ORDER BY timestamp ASC", (session_id,)).fetchall()
+        agent_extractions = []
+        for row in agent_extractions_raw:
+            extraction = dict(row)
+            extraction['extracted_data'] = json.loads(extraction['extracted_data']) # Deserialize JSON
+            agent_extractions.append(extraction)
+
+        triggered_actions_raw = conn.execute("SELECT * FROM triggered_actions WHERE session_id = ? ORDER BY timestamp ASC", (session_id,)).fetchall()
+        triggered_actions = []
+        for row in triggered_actions_raw:
+            action = dict(row)
+            if action['details']:
+                action['details'] = json.loads(action['details']) # Deserialize JSON
+            triggered_actions.append(action)
+
+        conn.close()
+        
+        return {
+            "session_info": dict(session_data),
+            "agent_outputs": agent_extractions,
+            "actions_taken": triggered_actions
+        }
