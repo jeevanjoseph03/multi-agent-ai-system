@@ -9,6 +9,9 @@ import logging
 import random
 
 from multi_agent_system.memory.memory_store import MemoryStore # Assuming MemoryStore is accessible
+from multi_agent_system.agents.email_agent import EmailActionType # Add this import
+from multi_agent_system.agents.json_agent import JSONActionType # Add this import
+from multi_agent_system.agents.pdf_agent import PDFActionType # Add this import
 
 class ActionType(Enum):
     ESCALATE_TO_CRM = "escalate_to_crm"
