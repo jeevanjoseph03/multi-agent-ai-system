@@ -1,0 +1,27 @@
+INVOICE #INV-2025-001
+Date: May 30, 2025
+Due Date: June 30, 2025
+
+Bill To:
+ABC Corporation
+123 Business Street
+New York, NY 10001
+
+Ship To:
+ABC Corporation - Warehouse
+456 Storage Avenue
+Newark, NJ 07101
+
+Description                    Qty    Unit Price    Total
+Enterprise Software License    1      $25,000.00    $25,000.00
+Implementation Services        40     $150.00       $6,000.00
+Training Package              1      $2,000.00     $2,000.00
+
+                                      Subtotal:     $33,000.00
+                                      Tax (8%):     $2,640.00
+                                      TOTAL:        $35,640.00
+
+Payment Terms: Net 30 Days
+This invoice contains customer data protected under GDPR regulations.
+
+Thank you for your business!

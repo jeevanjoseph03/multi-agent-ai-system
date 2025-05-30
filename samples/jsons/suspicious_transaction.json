@@ -1,0 +1,13 @@
+{
+    "transaction_id": "TXN-SUSPICIOUS-999",
+    "amount": 15000,
+    "user_id": "test_user",
+    "timestamp": "2025-05-30T06:30:22Z",
+    "currency": "USD",
+    "status": "pending",
+    "flags": ["high_amount", "suspicious_user"],
+    "metadata": {
+        "ip_address": "127.0.0.1",
+        "user_agent": "TestBot/1.0"
+    }
+}

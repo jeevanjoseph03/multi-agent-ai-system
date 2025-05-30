@@ -1,0 +1,9 @@
+{
+    "transaction_id": "TXN-NORMAL-123",
+    "amount": 150.00,
+    "user_id": "john_doe_verified",
+    "timestamp": "2025-05-30T06:30:22Z",
+    "currency": "USD",
+    "status": "completed",
+    "payment_method": "credit_card"
+}
