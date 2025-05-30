@@ -150,7 +150,12 @@ async def process_text_content(
             agent_results["json_agent"] = json_agent.get_extracted_fields(json_analysis)
             memory_store.store_extracted_fields(session_id, "json_agent", agent_results["json_agent"])
         
-        # Step 3: Determine and execute actions
+        
+        elif classification_result.format_type.value == "pdf":
+            pdf_analysis = pdf_agent.process_pdf(request.content, "text")
+            agent_results["pdf_agent"] = pdf_agent.get_extracted_fields(pdf_analysis)
+            memory_store.store_extracted_fields(session_id, "pdf_agent", agent_results["pdf_agent"])
+        
         actions_taken = []
         for agent_name, agent_output in agent_results.items():
             action_request = action_router.create_action_from_agent_output(
