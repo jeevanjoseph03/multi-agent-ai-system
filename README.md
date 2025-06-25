@@ -128,4 +128,3 @@ graph TD
 ```
 
 This should give a good, practical overview of your project!
-.
